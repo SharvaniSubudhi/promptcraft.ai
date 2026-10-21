@@ -1,0 +1,1646 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>PromptCraft AI — Smart Prompt Engineering Laboratory</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- Font Awesome Icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  
+  <style>
+    body {
+      font-family: 'Inter', sans-serif;
+      background-color: #f8fafc;
+      color: #0f172a;
+    }
+    code, pre {
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .custom-scrollbar::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    .custom-scrollbar::-webkit-scrollbar-track {
+      background: #f1f5f9;
+    }
+    .custom-scrollbar::-webkit-scrollbar-thumb {
+      background: #cbd5e1;
+      border-radius: 4px;
+    }
+    .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+      background: #94a3b8;
+    }
+    @keyframes pulse-subtle {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.7; }
+    }
+    .animate-pulse-subtle {
+      animation: pulse-subtle 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+    }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-900 antialiased selection:bg-purple-500 selection:text-white">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useMemo } = React;
+
+    // --- GEMINI API INTEGRATION HELPERS ---
+    const MODEL_NAME = "gemini-3-flash-preview";
+
+    async function callGeminiAPI(systemPrompt, userQuery, userApiKey, isJson = false) {
+      let url;
+      let payload;
+
+      if (userApiKey && userApiKey.trim() !== "") {
+        url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${userApiKey.trim()}`;
+        payload = {
+          contents: [{ parts: [{ text: userQuery }] }],
+          systemInstruction: { parts: [{ text: systemPrompt }] }
+        };
+        if (isJson) {
+          payload.generationConfig = { responseMimeType: "application/json" };
+        }
+      } else {
+        url = `/api/gemini`;
+        payload = { systemPrompt, userQuery, isJson };
+      }
+
+      let attempts = 0;
+      const maxAttempts = 3;
+      let delay = 1000;
+
+      while (attempts < maxAttempts) {
+        try {
+          const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+
+          if (!res.ok) {
+            if (res.status === 400 || res.status === 403) {
+              throw new Error("Invalid or missing Gemini API Key. Please click 'Configure Gemini API Key' in the top bar to enter a valid key.");
+            }
+            throw new Error(`Gemini API Error: Status ${res.status}`);
+          }
+
+          const data = await res.json();
+          const text = userApiKey ? data?.candidates?.[0]?.content?.parts?.[0]?.text : data?.text;
+          if (!text) throw new Error("Received empty response from Gemini API engine.");
+
+          return isJson ? (typeof text === 'string' ? JSON.parse(text) : text) : text;
+        } catch (err) {
+          attempts++;
+          if (attempts >= maxAttempts) throw err;
+          await new Promise(r => setTimeout(r, delay));
+          delay *= 2;
+        }
+      }
+    }
+
+    // --- TEMPLATES DATASET ---
+    const INITIAL_TEMPLATES = [
+      {
+        id: 't1',
+        title: 'Explain Complex Concept to a Beginner',
+        category: 'Study and Learning',
+        description: 'Breaks down advanced technical or academic topics using analogies and clean formatting.',
+        prompt: 'Act as an expert instructor. Explain the concept of [TOPIC, e.g., Quantum Computing] to a beginner with no prior background. Use real-world analogies, define key jargon simply, highlight why it matters, and end with 3 quick self-assessment questions.'
+      },
+      {
+        id: 't2',
+        title: 'Debug & Fix Code Errors',
+        category: 'Coding and Debugging',
+        description: 'Identifies bugs, explains root causes, provides clean fixed code, and offers optimization tips.',
+        prompt: 'Act as a Senior Software Engineer. Review the following code snippet for bugs, logical flaws, or edge cases. Identify the exact root cause of error [PASTE ERROR MESSAGE OR BUG BEHAVIOR], provide the corrected code, and explain why the fix works.\n\nCode Snippet:\n[INSERT CODE HERE]'
+      },
+      {
+        id: 't3',
+        title: 'Summarize Academic Paper',
+        category: 'Academic Research',
+        description: 'Extracts core research questions, methodologies, key findings, and implications.',
+        prompt: 'Act as an academic research assistant. Summarize the following study/paper text into key components: 1) Core Hypothesis, 2) Methodology Used, 3) Primary Findings, 4) Limitations, and 5) Key Practical Takeaways for researchers.\n\nPaper Excerpt / Abstract:\n[INSERT TEXT]'
+      },
+      {
+        id: 't4',
+        title: 'Technical Interview Prep',
+        category: 'Resume and Interview Preparation',
+        description: 'Simulates a mock interview session for specific job roles and seniority levels.',
+        prompt: 'Act as a Principal Engineer at a top tech firm interviewing me for a [ROLE, e.g., Full Stack Developer] position. Ask me 3 challenging technical questions focusing on [TOPIC, e.g., System Design / React]. Provide constructive critique on my answers after I reply.'
+      },
+      {
+        id: 't5',
+        title: 'Create Slide Presentation Outline',
+        category: 'Presentation Creation',
+        description: 'Generates a structured, engaging 10-slide deck with speaker notes and visual cues.',
+        prompt: 'Act as a presentation strategist. Create a high-impact 8-to-10 slide presentation outline about [TOPIC/PITCH]. For each slide, list: Slide Title, Key Bullet Points, Suggested Visual/Graphic, and Speaker Talking Points.'
+      },
+      {
+        id: 't6',
+        title: 'Engaging Blog Post / Article',
+        category: 'Content Writing',
+        description: 'Drafts persuasive, well-structured content optimized for reader engagement and SEO.',
+        prompt: 'Act as a content strategist. Write a 500-word engaging article on [TOPIC]. Include a catchy headline, an attention-grabbing hook, 3 main subheadings with actionable advice, and a compelling call-to-action summary.'
+      },
+      {
+        id: 't7',
+        title: 'Business Model Canvas Draft',
+        category: 'Business Planning',
+        description: 'Structures startup or product ideas into value propositions, customer segments, and revenue streams.',
+        prompt: 'Act as a business startup mentor. Create a high-level Business Plan outline for [BUSINESS IDEA]. Detail: 1) Value Proposition, 2) Target Customer Persona, 3) Key Revenue Streams, 4) Cost Structure, and 5) Top 3 Market Risks with Mitigation Strategies.'
+      },
+      {
+        id: 't8',
+        title: 'Data Analysis & Insights Query',
+        category: 'Data Analysis',
+        description: 'Guides raw dataset exploration, KPI tracking, and analytical reporting setup.',
+        prompt: 'Act as a Lead Data Analyst. I have a dataset containing variables [LIST VARIABLES, e.g., Sales, Date, Region, Product]. Suggest 5 critical business metrics to analyze, 3 data visualization charts to build, and potential anomaly checks to perform.'
+      },
+      {
+        id: 't9',
+        title: 'Code Refactoring for Clean Architecture',
+        category: 'Coding and Debugging',
+        description: 'Transforms messy working code into clean, scalable, maintainable patterns.',
+        prompt: 'Act as a Code Quality Specialist. Refactor the following code to adhere to SOLID principles, clean code standards, and proper error handling. Explain your architectural improvements step-by-step.\n\nCode:\n[PASTE CODE]'
+      },
+      {
+        id: 't10',
+        title: 'Tailored Resume Bullet Points',
+        category: 'Resume and Interview Preparation',
+        description: 'Crafts impact-driven, metrics-focused resume achievement statements.',
+        prompt: 'Act as a professional career coach. Transform these rough job responsibilities into 4 powerful, quantifiable STAR-method bullet points for a [JOB TITLE] resume:\n\nResponsibilities:\n[PASTE RESPONSIBILITIES]'
+      },
+      {
+        id: 't11',
+        title: 'Socratic Literature Review',
+        category: 'Academic Research',
+        description: 'Generates probing research questions to refine research proposals and theses.',
+        prompt: 'Act as a PhD dissertation advisor. I am working on a research topic regarding [TOPIC]. Generate 5 critical analytical questions that probe potential flaws, counter-arguments, or unexamined variables in my proposal.'
+      },
+      {
+        id: 't12',
+        title: 'Interactive Quiz Generator',
+        category: 'Study and Learning',
+        description: 'Designs study quizzes with varying difficulty levels and detailed explanations.',
+        prompt: 'Act as an educational assessment designer. Create a 5-question multiple-choice quiz testing knowledge on [SUBJECT]. Provide 4 options per question, mark the correct answer, and provide a clear 2-sentence explanation for why each answer is correct or incorrect.'
+      }
+    ];
+
+    // --- MAIN APP COMPONENT ---
+    function App() {
+      const [activeTab, setActiveTab] = useState('dashboard');
+      const [apiKey, setApiKey] = useState(() => localStorage.getItem('promptcraft_gemini_key') || '');
+      const [showKeyModal, setShowKeyModal] = useState(false);
+      const [tempKeyInput, setTempKeyInput] = useState('');
+      
+      // Prompt Improver State
+      const [originalPrompt, setOriginalPrompt] = useState('');
+      const [useCase, setUseCase] = useState('General');
+      const [outputStyle, setOutputStyle] = useState('Detailed');
+      const [additionalContext, setAdditionalContext] = useState('');
+      const [improverLoading, setImproverLoading] = useState(false);
+      const [improverResult, setImproverResult] = useState(null);
+      const [improverError, setImproverError] = useState(null);
+      const [isSampleMode, setIsSampleMode] = useState(false);
+
+      // Evaluator State
+      const [evalPrompt, setEvalPrompt] = useState('');
+      const [evalLoading, setEvalLoading] = useState(false);
+      const [evalResult, setEvalResult] = useState(null);
+      const [evalError, setEvalError] = useState(null);
+
+      // Compare State
+      const [compOrigPrompt, setCompOrigPrompt] = useState('');
+      const [compImprPrompt, setCompImprPrompt] = useState('');
+      const [compLoading, setCompLoading] = useState(false);
+      const [compResults, setCompResults] = useState(null);
+      const [compError, setCompError] = useState(null);
+
+      // Saved Prompts State
+      const [savedPrompts, setSavedPrompts] = useState(() => {
+        try {
+          const local = localStorage.getItem('promptcraft_saved');
+          return local ? JSON.parse(local) : [
+            {
+              id: 'sp1',
+              title: 'Beginner ML Explainer',
+              category: 'Study',
+              original: 'Explain machine learning to a beginner.',
+              improved: 'Act as an engaging Computer Science Professor. Explain the foundational concept of Machine Learning to a complete beginner with no prior programming experience.\n\nStructure your explanation as follows:\n1. Hook: Everyday analogy (e.g., email spam filter).\n2. Core Paradigms: Compare Supervised, Unsupervised, and Reinforcement learning simply.\n3. Contrast: Contrast traditional rule-based software with machine learning models.\n4. Key Vocabulary: Define Model, Training Data, Features, and Inference in plain language.\n5. Quiz: End with 5 short multiple-choice questions with answer key.',
+              date: new Date().toLocaleDateString()
+            }
+          ];
+        } catch(e) {
+          return [];
+        }
+      });
+
+      // Toast Notification State
+      const [toast, setToast] = useState(null);
+
+      useEffect(() => {
+        try {
+          localStorage.setItem('promptcraft_saved', JSON.stringify(savedPrompts));
+        } catch(e) {}
+      }, [savedPrompts]);
+
+      const saveApiKey = (key) => {
+        const trimmed = key.trim();
+        setApiKey(trimmed);
+        localStorage.setItem('promptcraft_gemini_key', trimmed);
+        setShowKeyModal(false);
+        showToast(trimmed ? "Gemini API Key saved securely!" : "API Key cleared from browser storage.");
+      };
+
+      const showToast = (message, type = 'success') => {
+        setToast({ message, type });
+        setTimeout(() => setToast(null), 3500);
+      };
+
+      const copyToClipboard = (text, label = "Prompt copied to clipboard!") => {
+        if (!text) return;
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(() => showToast(label)).catch(() => fallbackCopy(text, label));
+        } else {
+          fallbackCopy(text, label);
+        }
+      };
+
+      const fallbackCopy = (text, label) => {
+        const textarea = document.createElement("textarea");
+        textarea.value = text;
+        textarea.style.position = "fixed";
+        textarea.style.opacity = "0";
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+        try {
+          document.execCommand("copy");
+          showToast(label);
+        } catch (err) {
+          showToast("Failed to copy text", "error");
+        }
+        document.body.removeChild(textarea);
+      };
+
+      // --- IMPROVER ACTION ---
+      const handleImprovePrompt = async (e) => {
+        if (e) e.preventDefault();
+        if (!originalPrompt.trim()) {
+          showToast("Please enter an original prompt first.", "warning");
+          return;
+        }
+
+        setIsSampleMode(false);
+        setImproverLoading(true);
+        setImproverError(null);
+        setImproverResult(null);
+
+        const sysPrompt = `You are PromptCraft AI, an elite Prompt Engineering Laboratory system. Your job is to transform raw, basic prompts into highly structured, context-rich, effective prompts for Large Language Models.
+You will return JSON with this exact structure:
+{
+  "improvedPrompt": "The enhanced, ready-to-use prompt here",
+  "explanation": "Clear explanation of structural changes made and why",
+  "keyImprovements": ["Improvement point 1", "Improvement point 2", "Improvement point 3"],
+  "followUpSuggestions": ["Suggested tweak 1", "Suggested tweak 2"]
+}`;
+
+        const userMsg = `Transform this prompt:
+Original Prompt: "${originalPrompt}"
+Domain/Use Case: ${useCase}
+Target Tone/Style: ${outputStyle}
+Additional Context/Constraints: ${additionalContext || "None specified"}`;
+
+        try {
+          const res = await callGeminiAPI(sysPrompt, userMsg, apiKey, true);
+          setImproverResult(res);
+        } catch (err) {
+          console.error(err);
+          setImproverError(err.message || "Failed to generate improved prompt using Gemini API.");
+        } finally {
+          setImproverLoading(false);
+        }
+      };
+
+      // --- SAMPLE LOADER ACTION ---
+      const handleLoadSample = () => {
+        const sampleOrig = "Explain machine learning to a beginner.";
+        setOriginalPrompt(sampleOrig);
+        setUseCase("Study");
+        setOutputStyle("Detailed");
+        setAdditionalContext("Targeting high school or first-year college students.");
+        setIsSampleMode(true);
+        setImproverError(null);
+
+        setImproverResult({
+          improvedPrompt: `Act as an engaging Computer Science Professor. Explain the foundational concepts of Machine Learning to a high school or first-year college student with zero prior background.
+
+Your explanation must include the following structured elements:
+1. Analogy: Start with a relatable everyday analogy (e.g., an automated email spam filter or video recommendation algorithm).
+2. ML Paradigms: Clearly break down the differences between:
+   - Supervised Learning
+   - Unsupervised Learning
+   - Reinforcement Learning
+3. Paradigm Shift: Contrast traditional rule-based software development with machine learning.
+4. Key Terminology: Define terms simply in plain language (Model, Training Data, Features, Prediction/Inference).
+5. Visual Diagram: Include a basic ASCII/text workflow diagram showing (Data -> Training -> Model -> Prediction).
+6. Knowledge Check: Conclude with 5 short multiple-choice questions complete with an answer key at the bottom.`,
+          explanation: "The prompt was expanded from a single sentence into a multi-part role-based instruction. It explicitly sets an persona (CS Professor), defines target audience constraints, mandates specific structural components (analogy, paradigms, definitions, diagram), and adds a self-assessment feature.",
+          keyImprovements: [
+            "Assigned explicit persona ('Computer Science Professor')",
+            "Specified audience level (beginner / high school / college)",
+            "Required practical analogy and text-based workflow diagram",
+            "Added concrete task constraints and output formatting requirements"
+          ],
+          followUpSuggestions: [
+            "Ask the AI to generate python code examples using Scikit-Learn",
+            "Request a glossary table of ML terminology"
+          ]
+        });
+
+        showToast("Loaded sample demonstration data!");
+      };
+
+      // --- EVALUATOR ACTION ---
+      const handleEvaluatePrompt = async () => {
+        if (!evalPrompt.trim()) {
+          showToast("Please enter a prompt to evaluate.", "warning");
+          return;
+        }
+
+        setEvalLoading(true);
+        setEvalError(null);
+        setEvalResult(null);
+
+        const sysPrompt = `You are a heuristic Prompt Evaluator. Analyze the given prompt across 6 critical quality dimensions.
+Calculate realistic scores (0-100) and provide evidence-based explanations.
+IMPORTANT: The overall score must be the exact average of the 6 dimensions.
+Return ONLY valid JSON with this structure:
+{
+  "clarity": { "score": 85, "reason": "Reason for score..." },
+  "specificity": { "score": 70, "reason": "Reason for score..." },
+  "context": { "score": 60, "reason": "Reason for score..." },
+  "taskDefinition": { "score": 90, "reason": "Reason for score..." },
+  "outputFormat": { "score": 50, "reason": "Reason for score..." },
+  "constraints": { "score": 40, "reason": "Reason for score..." },
+  "overallScore": 66,
+  "overallSummary": "Summary statement...",
+  "topSuggestions": ["Suggestion 1", "Suggestion 2", "Suggestion 3"]
+}`;
+
+        try {
+          const res = await callGeminiAPI(sysPrompt, `Evaluate this prompt:\n"${evalPrompt}"`, apiKey, true);
+          setEvalResult(res);
+        } catch (err) {
+          console.error(err);
+          setEvalError(err.message || "Could not calculate evaluation scores via Gemini API.");
+        } finally {
+          setEvalLoading(false);
+        }
+      };
+
+      // --- COMPARE ACTION ---
+      const handleRunComparison = async () => {
+        if (!compOrigPrompt.trim() || !compImprPrompt.trim()) {
+          showToast("Please provide both the original and improved prompts.", "warning");
+          return;
+        }
+
+        setCompLoading(true);
+        setCompError(null);
+        setCompResults(null);
+
+        try {
+          const sys = "You are a neutral AI assistant responding directly to user instructions.";
+          const [resOrig, resImpr] = await Promise.all([
+            callGeminiAPI(sys, compOrigPrompt, apiKey, false),
+            callGeminiAPI(sys, compImprPrompt, apiKey, false)
+          ]);
+
+          setCompResults({
+            origResponse: resOrig,
+            imprResponse: resImpr
+          });
+        } catch (err) {
+          console.error(err);
+          setCompError(err.message || "Error running prompt comparison.");
+        } finally {
+          setCompLoading(false);
+        }
+      };
+
+      // --- SAVE PROMPT ACTION ---
+      const handleSavePrompt = (title, category, original, improved) => {
+        const newItem = {
+          id: 'sp_' + Date.now(),
+          title: title || 'Untitled Prompt',
+          category: category || 'General',
+          original,
+          improved,
+          date: new Date().toLocaleDateString()
+        };
+        setSavedPrompts([newItem, ...savedPrompts]);
+        showToast("Prompt saved to local laboratory storage!");
+      };
+
+      // Send to Improver
+      const sendToImprover = (promptText) => {
+        setOriginalPrompt(promptText);
+        setActiveTab('improver');
+        showToast("Transferred to Prompt Improver!");
+      };
+
+      // Send to Evaluator
+      const sendToEvaluator = (promptText) => {
+        setEvalPrompt(promptText);
+        setActiveTab('evaluator');
+        showToast("Transferred to Prompt Evaluator!");
+      };
+
+      // Send to Comparison
+      const sendToCompare = (orig, impr) => {
+        setCompOrigPrompt(orig);
+        setCompImprPrompt(impr);
+        setActiveTab('compare');
+        showToast("Transferred to Prompt Comparison Workspace!");
+      };
+
+      return (
+        <div className="min-h-screen flex flex-col bg-slate-50">
+          {/* Header Bar */}
+          <header className="bg-slate-900 text-white sticky top-0 z-40 shadow-md border-b border-slate-800">
+            <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+              <div className="flex items-center justify-between h-16">
+                
+                {/* Brand Logo */}
+                <div className="flex items-center space-x-3 cursor-pointer" onClick={() => setActiveTab('dashboard')}>
+                  <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-purple-600 via-indigo-500 to-blue-500 flex items-center justify-center shadow-lg shadow-indigo-500/30">
+                    <i className="fa-solid me-0 fa-wand-magic-sparkles text-white text-lg"></i>
+                  </div>
+                  <div>
+                    <div className="flex items-center space-x-2">
+                      <span className="font-extrabold text-xl tracking-tight bg-gradient-to-r from-white via-indigo-200 to-purple-300 bg-clip-text text-transparent">
+                        PromptCraft<span className="text-indigo-400">.AI</span>
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-400 hidden sm:block">Turn Simple Ideas into Powerful Prompts</p>
+                  </div>
+                </div>
+
+                {/* Configure API Key Action Button */}
+                <button
+                  onClick={() => {
+                    setTempKeyInput(apiKey);
+                    setShowKeyModal(true);
+                  }}
+                  className={`flex items-center space-x-2 text-xs font-bold px-3.5 py-2 rounded-xl transition shadow-md ${
+                    apiKey 
+                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 hover:bg-emerald-500/30' 
+                      : 'bg-indigo-600 hover:bg-indigo-500 text-white border border-indigo-400/50 shadow-indigo-500/20'
+                  }`}
+                >
+                  <i className={`fa-solid ${apiKey ? 'fa-circle-check text-emerald-400' : 'fa-key'}`}></i>
+                  <span>{apiKey ? 'API Key Configured' : 'Configure Gemini API Key'}</span>
+                </button>
+
+              </div>
+            </div>
+          </header>
+
+          {/* Setup Banner if key is missing */}
+          {!apiKey && (
+            <div className="bg-gradient-to-r from-indigo-900 via-indigo-800 to-purple-900 text-indigo-100 text-xs py-2.5 px-4 shadow-inner border-b border-indigo-700/50">
+              <div className="max-w-7xl mx-auto flex items-center justify-between flex-wrap gap-2">
+                <div className="flex items-center space-x-2">
+                  <i className="fa-solid fa-circle-info text-indigo-300 text-sm"></i>
+                  <span><strong>Setup Needed:</strong> Enter your Gemini API key to enable live AI prompt optimization and direct evaluations.</span>
+                </div>
+                <button
+                  onClick={() => {
+                    setTempKeyInput('');
+                    setShowKeyModal(true);
+                  }}
+                  className="underline text-white font-bold hover:text-indigo-200 text-xs cursor-pointer ml-auto"
+                >
+                  Click here to set key &rarr;
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Key Settings Modal */}
+          {showKeyModal && (
+            <div className="fixed inset-0 z-50 bg-slate-900/70 backdrop-blur-sm flex items-center justify-center p-4">
+              <div className="bg-white rounded-3xl p-6 max-w-md w-full shadow-2xl border border-slate-200 space-y-4">
+                <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                  <h3 className="font-extrabold text-slate-900 text-base flex items-center space-x-2">
+                    <i className="fa-solid fa-key text-indigo-600"></i>
+                    <span>Configure Gemini API Key</span>
+                  </h3>
+                  <button onClick={() => setShowKeyModal(false)} className="text-slate-400 hover:text-slate-600 text-sm p-1">
+                    <i className="fa-solid fa-xmark text-lg"></i>
+                  </button>
+                </div>
+
+                <p className="text-xs text-slate-600 leading-relaxed">
+                  To use live AI prompt generation on Vercel without hardcoding keys, paste your free Gemini API key below. It is stored safely in your browser local storage.
+                </p>
+
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-700 uppercase tracking-wider mb-1">
+                    Gemini API Key
+                  </label>
+                  <input
+                    type="password"
+                    value={tempKeyInput}
+                    onChange={(e) => setTempKeyInput(e.target.value)}
+                    placeholder="AIzaSy..."
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs font-mono text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                </div>
+
+                <div className="flex items-center justify-between pt-2">
+                  <a 
+                    href="https://aistudio.google.com/" 
+                    target="_blank" 
+                    rel="noreferrer" 
+                    className="text-xs font-semibold text-indigo-600 hover:underline flex items-center space-x-1"
+                  >
+                    <span>Get free key from Google AI Studio</span>
+                    <i className="fa-solid fa-arrow-up-right-from-square text-[10px]"></i>
+                  </a>
+
+                  <div className="flex items-center space-x-2">
+                    <button
+                      onClick={() => saveApiKey('')}
+                      className="px-3 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl transition"
+                    >
+                      Clear Key
+                    </button>
+                    <button
+                      onClick={() => saveApiKey(tempKeyInput)}
+                      className="px-4 py-2 text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl shadow-md transition"
+                    >
+                      Save Key
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Main Content Layout */}
+          <div className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 flex flex-col md:flex-row gap-6">
+            
+            {/* Sidebar Navigation */}
+            <aside className="w-full md:w-64 shrink-0">
+              <nav className="bg-white rounded-2xl p-3 shadow-sm border border-slate-200/80 sticky top-22 flex md:flex-col gap-1 overflow-x-auto custom-scrollbar">
+                
+                <NavItem 
+                  active={activeTab === 'dashboard'} 
+                  onClick={() => setActiveTab('dashboard')} 
+                  icon="fa-chart-pie" 
+                  label="Dashboard" 
+                />
+                <NavItem 
+                  active={activeTab === 'improver'} 
+                  onClick={() => setActiveTab('improver')} 
+                  icon="fa-wand-magic-sparkles" 
+                  label="Prompt Improver" 
+                  badge="Core"
+                />
+                <NavItem 
+                  active={activeTab === 'evaluator'} 
+                  onClick={() => setActiveTab('evaluator')} 
+                  icon="fa-gauge-high" 
+                  label="Prompt Evaluator" 
+                />
+                <NavItem 
+                  active={activeTab === 'compare'} 
+                  onClick={() => setActiveTab('compare')} 
+                  icon="fa-code-compare" 
+                  label="Compare Prompts" 
+                />
+                <NavItem 
+                  active={activeTab === 'templates'} 
+                  onClick={() => setActiveTab('templates')} 
+                  icon="fa-layer-group" 
+                  label="Prompt Templates" 
+                />
+                <NavItem 
+                  active={activeTab === 'saved'} 
+                  onClick={() => setActiveTab('saved')} 
+                  icon="fa-bookmark" 
+                  label="Saved Lab Prompts" 
+                  count={savedPrompts.length}
+                />
+
+              </nav>
+
+              {/* Status & Key Info Card */}
+              <div className="mt-4 bg-gradient-to-br from-indigo-900 to-purple-950 text-white p-4 rounded-2xl shadow-sm border border-indigo-800 hidden md:block">
+                <div className="flex items-center space-x-2 text-indigo-300 text-xs font-semibold mb-2">
+                  <span className={`w-2 h-2 rounded-full ${apiKey ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`}></span>
+                  <span>API Status: {apiKey ? 'Configured' : 'Needs Key'}</span>
+                </div>
+                <p className="text-xs text-indigo-200/80 leading-relaxed mb-2">
+                  Engineered for real-time prompt analysis & smart optimization workspace.
+                </p>
+                <button
+                  onClick={() => {
+                    setTempKeyInput(apiKey);
+                    setShowKeyModal(true);
+                  }}
+                  className="text-[11px] underline text-indigo-300 hover:text-white font-medium"
+                >
+                  Configure API Key &rarr;
+                </button>
+              </div>
+            </aside>
+
+            {/* Content Area */}
+            <main className="flex-1 min-w-0">
+              
+              {/* Toast Render */}
+              {toast && (
+                <div className={`fixed bottom-5 right-5 z-50 flex items-center space-x-2 px-4 py-3 rounded-xl shadow-xl text-sm font-medium transition transform animate-bounce ${
+                  toast.type === 'error' ? 'bg-red-600 text-white' : 
+                  toast.type === 'warning' ? 'bg-amber-500 text-white' : 'bg-slate-900 text-white'
+                }`}>
+                  <i className={`fa-solid ${toast.type === 'error' ? 'fa-triangle-exclamation' : toast.type === 'warning' ? 'fa-circle-exclamation' : 'fa-circle-check text-emerald-400'}`}></i>
+                  <span>{toast.message}</span>
+                </div>
+              )}
+
+              {/* ROUTER VIEWS */}
+              {activeTab === 'dashboard' && (
+                <DashboardView 
+                  setActiveTab={setActiveTab} 
+                  setOriginalPrompt={setOriginalPrompt} 
+                  savedCount={savedPrompts.length}
+                  handleLoadSample={handleLoadSample}
+                  setShowKeyModal={setShowKeyModal}
+                  setTempKeyInput={setTempKeyInput}
+                  apiKey={apiKey}
+                />
+              )}
+
+              {activeTab === 'improver' && (
+                <ImproverView 
+                  originalPrompt={originalPrompt}
+                  setOriginalPrompt={setOriginalPrompt}
+                  useCase={useCase}
+                  setUseCase={setUseCase}
+                  outputStyle={outputStyle}
+                  setOutputStyle={setOutputStyle}
+                  additionalContext={additionalContext}
+                  setAdditionalContext={setAdditionalContext}
+                  improverLoading={improverLoading}
+                  improverResult={improverResult}
+                  improverError={improverError}
+                  isSampleMode={isSampleMode}
+                  handleImprovePrompt={handleImprovePrompt}
+                  handleLoadSample={handleLoadSample}
+                  copyToClipboard={copyToClipboard}
+                  sendToEvaluator={sendToEvaluator}
+                  sendToCompare={sendToCompare}
+                  handleSavePrompt={handleSavePrompt}
+                />
+              )}
+
+              {activeTab === 'evaluator' && (
+                <EvaluatorView 
+                  evalPrompt={evalPrompt}
+                  setEvalPrompt={setEvalPrompt}
+                  evalLoading={evalLoading}
+                  evalResult={evalResult}
+                  evalError={evalError}
+                  handleEvaluatePrompt={handleEvaluatePrompt}
+                  sendToImprover={sendToImprover}
+                  copyToClipboard={copyToClipboard}
+                />
+              )}
+
+              {activeTab === 'compare' && (
+                <CompareView 
+                  compOrigPrompt={compOrigPrompt}
+                  setCompOrigPrompt={setCompOrigPrompt}
+                  compImprPrompt={compImprPrompt}
+                  setCompImprPrompt={setCompImprPrompt}
+                  compLoading={compLoading}
+                  compResults={compResults}
+                  compError={compError}
+                  handleRunComparison={handleRunComparison}
+                  copyToClipboard={copyToClipboard}
+                />
+              )}
+
+              {activeTab === 'templates' && (
+                <TemplatesView 
+                  sendToImprover={sendToImprover}
+                  copyToClipboard={copyToClipboard}
+                />
+              )}
+
+              {activeTab === 'saved' && (
+                <SavedPromptsView 
+                  savedPrompts={savedPrompts}
+                  setSavedPrompts={setSavedPrompts}
+                  sendToImprover={sendToImprover}
+                  sendToEvaluator={sendToEvaluator}
+                  copyToClipboard={copyToClipboard}
+                  showToast={showToast}
+                />
+              )}
+
+            </main>
+          </div>
+
+          <footer className="mt-auto bg-white border-t border-slate-200 py-6 text-center text-xs text-slate-500">
+            <div className="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-2">
+              <p>PromptCraft AI — Smart Prompt Engineering Laboratory © 2026</p>
+            </div>
+          </footer>
+        </div>
+      );
+    }
+
+    // --- NAVIGATION ITEM ---
+    function NavItem({ active, onClick, icon, label, badge, count }) {
+      return (
+        <button
+          onClick={onClick}
+          className={`flex items-center justify-between px-3.5 py-2.5 rounded-xl font-medium text-sm transition whitespace-nowrap ${
+            active 
+              ? 'bg-gradient-to-r from-indigo-600 to-purple-600 text-white shadow-md shadow-indigo-500/20' 
+              : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+          }`}
+        >
+          <div className="flex items-center space-x-3">
+            <i className={`fa-solid ${icon} ${active ? 'text-white' : 'text-slate-400'} w-4 text-center`}></i>
+            <span>{label}</span>
+          </div>
+          {badge && (
+            <span className={`text-[10px] uppercase font-bold px-1.5 py-0.5 rounded ${active ? 'bg-white/20 text-white' : 'bg-indigo-100 text-indigo-700'}`}>
+              {badge}
+            </span>
+          )}
+          {count !== undefined && (
+            <span className={`text-xs px-2 py-0.5 rounded-full ${active ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-600'}`}>
+              {count}
+            </span>
+          )}
+        </button>
+      );
+    }
+
+    // --- DASHBOARD VIEW ---
+    function DashboardView({ setActiveTab, setOriginalPrompt, savedCount, handleLoadSample, setShowKeyModal, setTempKeyInput, apiKey }) {
+      const [quickInput, setQuickInput] = useState('');
+
+      const handleQuickStart = (e) => {
+        e.preventDefault();
+        if (!quickInput.trim()) return;
+        setOriginalPrompt(quickInput);
+        setActiveTab('improver');
+      };
+
+      return (
+        <div className="space-y-6">
+          {/* Welcome Banner */}
+          <div className="relative overflow-hidden bg-gradient-to-r from-slate-900 via-indigo-950 to-purple-950 rounded-3xl p-6 sm:p-8 text-white shadow-xl border border-slate-800">
+            <div className="absolute top-0 right-0 -mt-10 -mr-10 w-64 h-64 bg-indigo-500/10 rounded-full blur-3xl pointer-events-none"></div>
+            <div className="relative z-10 max-w-2xl">
+              <span className="inline-flex items-center space-x-2 px-3 py-1 rounded-full bg-indigo-500/20 text-indigo-300 text-xs font-semibold mb-4 border border-indigo-500/30">
+                <i className="fa-solid fa-bolt text-amber-400"></i>
+                <span>Smart Prompt Engineering Workspace</span>
+              </span>
+              <h1 className="text-2xl sm:text-4xl font-extrabold tracking-tight text-white mb-3 leading-tight">
+                Turn Simple Ideas into <br className="hidden sm:inline"/>
+                <span className="bg-gradient-to-r from-purple-400 via-indigo-300 to-blue-300 bg-clip-text text-transparent">
+                  Powerful AI Prompts.
+                </span>
+              </h1>
+              <p className="text-slate-300 text-sm sm:text-base mb-6 leading-relaxed">
+                Transform vague, generic questions into structured, high-performing prompts with roles, contexts, rules, and desired output schemas.
+              </p>
+              
+              {/* Quick Input Bar */}
+              <form onSubmit={handleQuickStart} className="flex flex-col sm:flex-row gap-2 bg-white/10 p-1.5 rounded-2xl backdrop-blur-md border border-white/10">
+                <input 
+                  type="text" 
+                  value={quickInput}
+                  onChange={(e) => setQuickInput(e.target.value)}
+                  placeholder="Enter a simple prompt idea (e.g. 'Write a cover letter for software engineer')..."
+                  className="flex-1 bg-transparent px-4 py-2.5 text-sm text-white placeholder-slate-400 focus:outline-none"
+                />
+                <button 
+                  type="submit"
+                  className="bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-600 hover:to-purple-700 text-white font-semibold text-sm px-5 py-2.5 rounded-xl transition shadow-md flex items-center justify-center space-x-2 shrink-0"
+                >
+                  <span>Craft Prompt</span>
+                  <i className="fa-solid fa-arrow-right text-xs"></i>
+                </button>
+              </form>
+            </div>
+          </div>
+
+          {/* Core Feature Quick Cards */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            
+            <FeatureCard 
+              icon="fa-wand-magic-sparkles" 
+              color="from-purple-500 to-indigo-600"
+              title="Prompt Improver"
+              desc="Transform basic prompts using domain-tailored personas, constraints, and output guidelines."
+              onClick={() => setActiveTab('improver')}
+              actionText="Open Workspace"
+            />
+
+            <FeatureCard 
+              icon="fa-gauge-high" 
+              color="from-indigo-500 to-blue-600"
+              title="Prompt Evaluator"
+              desc="Benchmark prompts across Clarity, Context, Constraints, and Output Format metrics."
+              onClick={() => setActiveTab('evaluator')}
+              actionText="Evaluate Prompt"
+            />
+
+            <FeatureCard 
+              icon="fa-code-compare" 
+              color="from-blue-500 to-teal-600"
+              title="Compare Outputs"
+              desc="Run before & after prompts side-by-side to observe real model output gains."
+              onClick={() => setActiveTab('compare')}
+              actionText="Compare Prompts"
+            />
+
+          </div>
+
+          {/* Secondary Quick Action Row */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            
+            {/* Quick Sample Demo Box */}
+            <div className="bg-white p-6 rounded-2xl border border-slate-200/80 shadow-sm flex flex-col justify-between">
+              <div>
+                <div className="flex items-center space-x-2 text-indigo-600 font-semibold text-sm mb-2">
+                  <i className="fa-solid fa-play-circle"></i>
+                  <span>Laboratory Demonstration Sample</span>
+                </div>
+                <h3 className="text-lg font-bold text-slate-900 mb-1">Instant Demo Case</h3>
+                <p className="text-slate-600 text-xs leading-relaxed mb-4">
+                  Quickly populate the workspace with a standard sample prompt: <span className="font-mono bg-slate-100 px-1.5 py-0.5 rounded text-indigo-700">"Explain machine learning to a beginner."</span>
+                </p>
+              </div>
+              <button
+                onClick={() => {
+                  handleLoadSample();
+                  setActiveTab('improver');
+                }}
+                className="w-full bg-slate-100 hover:bg-slate-200 text-slate-800 font-semibold text-xs py-2.5 rounded-xl transition flex items-center justify-center space-x-2"
+              >
+                <i className="fa-solid fa-flask text-indigo-600"></i>
+                <span>Load Lab Sample Data</span>
+              </button>
+            </div>
+
+            {/* API Config Box */}
+            <div className="bg-white p-6 rounded-2xl border border-slate-200/80 shadow-sm flex flex-col justify-between">
+              <div>
+                <div className="flex items-center space-x-2 text-emerald-600 font-semibold text-sm mb-2">
+                  <i className="fa-solid fa-key"></i>
+                  <span>Gemini API Key Configuration</span>
+                </div>
+                <h3 className="text-lg font-bold text-slate-900 mb-1">{apiKey ? 'Key Configured' : 'No Key Set'}</h3>
+                <p className="text-slate-600 text-xs leading-relaxed mb-4">
+                  {apiKey 
+                    ? 'Your Gemini API key is configured safely in browser local storage for direct AI generation.' 
+                    : 'Set your free Gemini API Key to enable live response generation on Vercel.'}
+                </p>
+              </div>
+              <button
+                onClick={() => {
+                  setTempKeyInput(apiKey);
+                  setShowKeyModal(true);
+                }}
+                className="w-full bg-slate-100 hover:bg-slate-200 text-slate-800 font-semibold text-xs py-2.5 rounded-xl transition flex items-center justify-center space-x-2"
+              >
+                <i className="fa-solid fa-gear text-emerald-600"></i>
+                <span>{apiKey ? 'Manage API Key' : 'Configure Gemini Key'}</span>
+              </button>
+            </div>
+
+          </div>
+        </div>
+      );
+    }
+
+    function FeatureCard({ icon, color, title, desc, onClick, actionText }) {
+      return (
+        <div className="bg-white p-6 rounded-2xl border border-slate-200/80 shadow-sm hover:shadow-md transition flex flex-col justify-between group">
+          <div>
+            <div className={`w-12 h-12 rounded-2xl bg-gradient-to-tr ${color} text-white flex items-center justify-center text-xl shadow-md mb-4 group-hover:scale-105 transition`}>
+              <i className={`fa-solid ${icon}`}></i>
+            </div>
+            <h3 className="font-bold text-slate-900 text-base mb-1">{title}</h3>
+            <p className="text-slate-500 text-xs leading-relaxed mb-4">{desc}</p>
+          </div>
+          <button 
+            onClick={onClick}
+            className="flex items-center justify-between text-xs font-semibold text-indigo-600 hover:text-indigo-800 pt-3 border-t border-slate-100"
+          >
+            <span>{actionText}</span>
+            <i className="fa-solid fa-chevron-right text-[10px] group-hover:translate-x-1 transition"></i>
+          </button>
+        </div>
+      );
+    }
+
+    // --- PROMPT IMPROVER VIEW ---
+    function ImproverView({
+      originalPrompt, setOriginalPrompt,
+      useCase, setUseCase,
+      outputStyle, setOutputStyle,
+      additionalContext, setAdditionalContext,
+      improverLoading, improverResult, improverError, isSampleMode,
+      handleImprovePrompt, handleLoadSample, copyToClipboard,
+      sendToEvaluator, sendToCompare, handleSavePrompt
+    }) {
+      const [editedPrompt, setEditedPrompt] = useState('');
+
+      useEffect(() => {
+        if (improverResult?.improvedPrompt) {
+          setEditedPrompt(improverResult.improvedPrompt);
+        }
+      }, [improverResult]);
+
+      const handleClear = () => {
+        setOriginalPrompt('');
+        setAdditionalContext('');
+      };
+
+      return (
+        <div className="space-y-6">
+          {/* Header */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white p-6 rounded-2xl border border-slate-200/80 shadow-sm">
+            <div>
+              <h2 className="text-xl font-extrabold text-slate-900 flex items-center space-x-2">
+                <i className="fa-solid fa-wand-magic-sparkles text-indigo-600"></i>
+                <span>Smart Prompt Improver Workspace</span>
+              </h2>
+              <p className="text-slate-500 text-xs mt-1">
+                Refine simple prompts into clear, highly-structured instructions with personas, context, and output definitions.
+              </p>
+            </div>
+            <button
+              onClick={handleLoadSample}
+              className="bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200 font-semibold text-xs px-3.5 py-2 rounded-xl transition flex items-center space-x-1.5 shrink-0"
+            >
+              <i className="fa-solid fa-vial"></i>
+              <span>Try Demo Sample</span>
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            
+            {/* Input Workspace Panel */}
+            <div className="bg-white p-6 rounded-2xl border border-slate-200/80 shadow-sm flex flex-col justify-between space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-2 flex items-center justify-between">
+                  <span>1. Original Raw Prompt *</span>
+                  <span className="text-[10px] font-normal text-slate-400">Required</span>
+                </label>
+                <textarea
+                  rows="5"
+                  value={originalPrompt}
+                  onChange={(e) => setOriginalPrompt(e.target.value)}
+                  placeholder="Enter your rough prompt or idea here... (e.g. 'Help me study for biology exam')"
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3.5 text-sm text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition custom-scrollbar"
+                />
+
+                {/* Configuration Options */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-4">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                      Domain / Use Case
+                    </label>
+                    <select
+                      value={useCase}
+                      onChange={(e) => setUseCase(e.target.value)}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition"
+                    >
+                      <option value="General">General / Everyday</option>
+                      <option value="Study">Study & Learning</option>
+                      <option value="Coding">Coding & Software</option>
+                      <option value="Academic Research">Academic Research</option>
+                      <option value="Resume and Career">Resume & Career</option>
+                      <option value="Content Writing">Content Writing</option>
+                      <option value="Business">Business & Strategy</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                      Target Output Tone
+                    </label>
+                    <select
+                      value={outputStyle}
+                      onChange={(e) => setOutputStyle(e.target.value)}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition"
+                    >
+                      <option value="Detailed">Detailed & Comprehensive</option>
+                      <option value="Simple">Simple & Beginner-Friendly</option>
+                      <option value="Professional">Professional & Formal</option>
+                      <option value="Creative">Creative & Engaging</option>
+                    </select>
+                  </div>
+                </div>
+
+                {/* Additional Context Field */}
+                <div className="mt-4">
+                  <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                    Additional Context / Target Audience (Optional)
+                  </label>
+                  <input
+                    type="text"
+                    value={additionalContext}
+                    onChange={(e) => setAdditionalContext(e.target.value)}
+                    placeholder="e.g. 'Targeting 1st year students', 'Limit to 3 paragraphs'"
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition"
+                  />
+                </div>
+              </div>
+
+              {/* Actions */}
+              <div className="pt-4 border-t border-slate-100 flex items-center justify-between gap-2">
+                <button
+                  type="button"
+                  onClick={handleClear}
+                  className="px-3 py-2 rounded-xl text-slate-500 hover:text-slate-700 hover:bg-slate-100 text-xs font-medium transition"
+                >
+                  Clear Fields
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleImprovePrompt}
+                  disabled={improverLoading}
+                  className="bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white font-semibold text-xs px-6 py-2.5 rounded-xl shadow-md transition flex items-center space-x-2 disabled:opacity-50"
+                >
+                  {improverLoading ? (
+                    <>
+                      <i className="fa-solid fa-circle-notch fa-spin"></i>
+                      <span>Engine Optimizing...</span>
+                    </>
+                  ) : (
+                    <>
+                      <i className="fa-solid fa-sparkles"></i>
+                      <span>Improve Prompt</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+
+            {/* Output Workspace Panel */}
+            <div className="bg-white p-6 rounded-2xl border border-slate-200/80 shadow-sm flex flex-col justify-between">
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <label className="text-xs font-bold text-slate-700 uppercase tracking-wider flex items-center space-x-2">
+                    <span>2. Enhanced Prompt Output</span>
+                    {isSampleMode && (
+                      <span className="text-[10px] bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full font-semibold border border-amber-200">
+                        Demo Mode
+                      </span>
+                    )}
+                  </label>
+                  {improverResult && (
+                    <button 
+                      onClick={() => copyToClipboard(editedPrompt, "Enhanced prompt copied!")}
+                      className="text-xs text-indigo-600 hover:text-indigo-800 font-medium flex items-center space-x-1"
+                    >
+                      <i className="fa-regular fa-copy"></i>
+                      <span>Copy</span>
+                    </button>
+                  )}
+                </div>
+
+                {improverError && (
+                  <div className="p-4 bg-red-50 border border-red-200 rounded-xl text-red-700 text-xs mb-4">
+                    <p className="font-semibold mb-1">Error Generating Prompt</p>
+                    <p>{improverError}</p>
+                  </div>
+                )}
+
+                {improverLoading ? (
+                  <div className="h-64 flex flex-col items-center justify-center space-y-3 bg-slate-50 rounded-xl border border-dashed border-slate-300">
+                    <div className="w-10 h-10 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin"></div>
+                    <p className="text-xs text-slate-500 font-medium animate-pulse-subtle">
+                      Applying Prompt Engineering Principles...
+                    </p>
+                  </div>
+                ) : improverResult ? (
+                  <div className="space-y-4">
+                    <textarea
+                      rows="8"
+                      value={editedPrompt}
+                      onChange={(e) => setEditedPrompt(e.target.value)}
+                      className="w-full bg-slate-900 text-emerald-400 font-mono text-xs p-4 rounded-xl border border-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500/30 custom-scrollbar leading-relaxed"
+                    />
+
+                    {/* Breakdown Tabs / Accordion */}
+                    <div className="space-y-3">
+                      <div className="bg-indigo-50/50 p-3.5 rounded-xl border border-indigo-100">
+                        <span className="text-xs font-bold text-indigo-900 block mb-1">
+                          <i className="fa-solid fa-circle-info text-indigo-600 mr-1.5"></i>
+                          Structural Rationale
+                        </span>
+                        <p className="text-xs text-indigo-950/80 leading-relaxed">
+                          {improverResult.explanation}
+                        </p>
+                      </div>
+
+                      {improverResult.keyImprovements?.length > 0 && (
+                        <div>
+                          <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block mb-1.5">
+                            Key Structural Enhancements
+                          </span>
+                          <div className="flex flex-wrap gap-1.5">
+                            {improverResult.keyImprovements.map((imp, idx) => (
+                              <span key={idx} className="bg-slate-100 text-slate-700 border border-slate-200 text-[11px] px-2.5 py-1 rounded-lg flex items-center space-x-1">
+                                <i className="fa-solid fa-check text-emerald-500 text-[10px]"></i>
+                                <span>{imp}</span>
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="h-64 flex flex-col items-center justify-center text-center p-6 bg-slate-50 rounded-xl border border-dashed border-slate-200">
+                    <div className="w-12 h-12 rounded-full bg-slate-200/60 flex items-center justify-center text-slate-400 mb-3">
+                      <i className="fa-solid fa-wand-magic text-xl"></i>
+                    </div>
+                    <p className="text-xs font-semibold text-slate-700">No Prompt Generated Yet</p>
+                    <p className="text-[11px] text-slate-400 max-w-xs mt-1">
+                      Enter a raw prompt on the left and click "Improve Prompt" to generate an optimized version.
+                    </p>
+                  </div>
+                )}
+              </div>
+
+              {/* Action Buttons for Result */}
+              {improverResult && (
+                <div className="pt-4 mt-4 border-t border-slate-100 flex flex-wrap gap-2 justify-end">
+                  <button
+                    onClick={() => handleSavePrompt("Improved Prompt", useCase, originalPrompt, editedPrompt)}
+                    className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-xl transition flex items-center space-x-1"
+                  >
+                    <i className="fa-solid fa-bookmark text-indigo-600"></i>
+                    <span>Save to Lab</span>
+                  </button>
+                  <button
+                    onClick={() => sendToEvaluator(editedPrompt)}
+                    className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-xl transition flex items-center space-x-1"
+                  >
+                    <i className="fa-solid fa-gauge-high text-blue-600"></i>
+                    <span>Evaluate Quality</span>
+                  </button>
+                  <button
+                    onClick={() => sendToCompare(originalPrompt, editedPrompt)}
+                    className="px-3 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-semibold rounded-xl transition flex items-center space-x-1"
+                  >
+                    <i className="fa-solid fa-code-compare text-indigo-600"></i>
+                    <span>Compare Outputs</span>
+                  </button>
+                </div>
+              )}
+            </div>
+
+          </div>
+        </div>
+      );
+    }
+
+    // --- PROMPT EVALUATOR VIEW ---
+    function EvaluatorView({
+      evalPrompt, setEvalPrompt, evalLoading, evalResult, evalError,
+      handleEvaluatePrompt, sendToImprover, copyToClipboard
+    }) {
+      const dimensions = [
+        { key: 'clarity', label: 'Clarity & Precision' },
+        { key: 'specificity', label: 'Specificity' },
+        { key: 'context', label: 'Contextual Depth' },
+        { key: 'taskDefinition', label: 'Task Definition' },
+        { key: 'outputFormat', label: 'Output Structure' },
+        { key: 'constraints', label: 'Constraints & Rules' }
+      ];
+
+      return (
+        <div className="space-y-6">
+          <div className="bg-white p-6 rounded-2xl border border-slate-200/80 shadow-sm">
+            <h2 className="text-xl font-extrabold text-slate-900 flex items-center space-x-2">
+              <i className="fa-solid fa-gauge-high text-indigo-600"></i>
+              <span>Prompt Quality Evaluator</span>
+            </h2>
+            <p className="text-slate-500 text-xs mt-1">
+              Benchmark prompt effectiveness across 6 essential heuristic prompt engineering criteria.
+            </p>
+
+            <div className="mt-4">
+              <textarea
+                rows="4"
+                value={evalPrompt}
+                onChange={(e) => setEvalPrompt(e.target.value)}
+                placeholder="Paste any prompt here to analyze its quality..."
+                className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition custom-scrollbar"
+              />
+              <div className="mt-3 flex justify-between items-center">
+                <span className="text-[11px] text-slate-400">
+                  Scores are heuristic lab assessments based on key principles.
+                </span>
+                <button
+                  onClick={handleEvaluatePrompt}
+                  disabled={evalLoading}
+                  className="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs px-5 py-2.5 rounded-xl shadow transition flex items-center space-x-2 disabled:opacity-50"
+                >
+                  {evalLoading ? (
+                    <>
+                      <i className="fa-solid fa-circle-notch fa-spin"></i>
+                      <span>Evaluating...</span>
+                    </>
+                  ) : (
+                    <>
+                      <i className="fa-solid fa-chart-bar"></i>
+                      <span>Run Evaluation</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {evalError && (
+            <div className="p-4 bg-red-50 border border-red-200 rounded-xl text-red-700 text-xs">
+              {evalError}
+            </div>
+          )}
+
+          {evalResult && (
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              
+              {/* Overall Score Badge Card */}
+              <div className="bg-white p-6 rounded-2xl border border-slate-200/80 shadow-sm flex flex-col items-center justify-center text-center">
+                <span className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">
+                  Overall Prompt Score
+                </span>
+                
+                <div className="relative w-32 h-32 flex items-center justify-center my-2">
+                  <div className="w-28 h-28 rounded-full border-8 border-indigo-100 flex items-center justify-center bg-slate-50">
+                    <span className="text-3xl font-extrabold text-indigo-600">
+                      {evalResult.overallScore}
+                    </span>
+                    <span className="text-xs text-slate-400 font-bold">/100</span>
+                  </div>
+                </div>
+
+                <p className="text-xs text-slate-600 leading-relaxed max-w-xs mt-2">
+                  {evalResult.overallSummary}
+                </p>
+
+                <button
+                  onClick={() => sendToImprover(evalPrompt)}
+                  className="mt-4 w-full bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-bold py-2.5 rounded-xl transition flex items-center justify-center space-x-1.5"
+                >
+                  <i className="fa-solid fa-wand-magic-sparkles"></i>
+                  <span>Improve This Prompt</span>
+                </button>
+              </div>
+
+              {/* Dimension Score Progress Bars */}
+              <div className="lg:col-span-2 bg-white p-6 rounded-2xl border border-slate-200/80 shadow-sm space-y-4">
+                <h3 className="text-sm font-bold text-slate-900 border-b border-slate-100 pb-2">
+                  Detailed Diagnostic Breakdown
+                </h3>
+
+                <div className="space-y-3.5">
+                  {dimensions.map(({ key, label }) => {
+                    const item = evalResult[key] || { score: 0, reason: '' };
+                    return (
+                      <div key={key} className="space-y-1">
+                        <div className="flex justify-between text-xs">
+                          <span className="font-semibold text-slate-700">{label}</span>
+                          <span className="font-bold text-indigo-600">{item.score}/100</span>
+                        </div>
+                        <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden">
+                          <div 
+                            className="h-full bg-gradient-to-r from-indigo-500 to-purple-600 rounded-full transition-all duration-500"
+                            style={{ width: `${item.score}%` }}
+                          ></div>
+                        </div>
+                        <p className="text-[11px] text-slate-500 leading-normal">{item.reason}</p>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {evalResult.topSuggestions?.length > 0 && (
+                  <div className="mt-4 pt-4 border-t border-slate-100">
+                    <span className="text-xs font-bold text-slate-700 block mb-2">Recommended Enhancements:</span>
+                    <ul className="space-y-1 text-xs text-slate-600 list-disc list-inside">
+                      {evalResult.topSuggestions.map((sug, i) => (
+                        <li key={i}>{sug}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // --- COMPARE PROMPTS VIEW ---
+    function CompareView({
+      compOrigPrompt, setCompOrigPrompt,
+      compImprPrompt, setCompImprPrompt,
+      compLoading, compResults, compError,
+      handleRunComparison, copyToClipboard
+    }) {
+      return (
+        <div className="space-y-6">
+          <div className="bg-white p-6 rounded-2xl border border-slate-200/80 shadow-sm">
+            <h2 className="text-xl font-extrabold text-slate-900 flex items-center space-x-2">
+              <i className="fa-solid fa-code-compare text-indigo-600"></i>
+              <span>Side-by-Side Response Comparison</span>
+            </h2>
+            <p className="text-slate-500 text-xs mt-1">
+              Observe how structured prompt improvements impact actual generative model outputs.
+            </p>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1.5">Original Prompt</label>
+                <textarea
+                  rows="4"
+                  value={compOrigPrompt}
+                  onChange={(e) => setCompOrigPrompt(e.target.value)}
+                  placeholder="Enter original basic prompt..."
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 custom-scrollbar"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1.5">Improved Prompt</label>
+                <textarea
+                  rows="4"
+                  value={compImprPrompt}
+                  onChange={(e) => setCompImprPrompt(e.target.value)}
+                  placeholder="Enter optimized structured prompt..."
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 custom-scrollbar"
+                />
+              </div>
+            </div>
+
+            <div className="mt-4 flex justify-end">
+              <button
+                onClick={handleRunComparison}
+                disabled={compLoading}
+                className="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs px-6 py-2.5 rounded-xl shadow transition flex items-center space-x-2 disabled:opacity-50"
+              >
+                {compLoading ? (
+                  <>
+                    <i className="fa-solid fa-circle-notch fa-spin"></i>
+                    <span>Running Dual Model Calls...</span>
+                  </>
+                ) : (
+                  <>
+                    <i className="fa-solid fa-play"></i>
+                    <span>Run Side-by-Side Comparison</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+
+          {compError && (
+            <div className="p-4 bg-red-50 border border-red-200 rounded-xl text-red-700 text-xs">
+              {compError}
+            </div>
+          )}
+
+          {compResults && (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              
+              {/* Original Model Response */}
+              <div className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-sm flex flex-col justify-between">
+                <div>
+                  <div className="flex items-center justify-between pb-3 mb-3 border-b border-slate-100">
+                    <span className="text-xs font-bold text-slate-500 uppercase">Original Prompt Output</span>
+                    <button 
+                      onClick={() => copyToClipboard(compResults.origResponse)}
+                      className="text-[11px] text-slate-400 hover:text-slate-600"
+                    >
+                      <i className="fa-regular fa-copy"></i>
+                    </button>
+                  </div>
+                  <div className="prose prose-slate prose-xs max-w-none text-slate-700 text-xs leading-relaxed whitespace-pre-wrap font-sans max-h-96 overflow-y-auto custom-scrollbar">
+                    {compResults.origResponse}
+                  </div>
+                </div>
+              </div>
+
+              {/* Improved Model Response */}
+              <div className="bg-white p-5 rounded-2xl border border-indigo-200 shadow-sm flex flex-col justify-between ring-1 ring-indigo-500/10">
+                <div>
+                  <div className="flex items-center justify-between pb-3 mb-3 border-b border-indigo-50">
+                    <span className="text-xs font-bold text-indigo-600 uppercase flex items-center space-x-1">
+                      <i className="fa-solid fa-sparkles"></i>
+                      <span>Improved Prompt Output</span>
+                    </span>
+                    <button 
+                      onClick={() => copyToClipboard(compResults.imprResponse)}
+                      className="text-[11px] text-indigo-600 hover:text-indigo-800"
+                    >
+                      <i className="fa-regular fa-copy"></i>
+                    </button>
+                  </div>
+                  <div className="prose prose-slate prose-xs max-w-none text-slate-800 text-xs leading-relaxed whitespace-pre-wrap font-sans max-h-96 overflow-y-auto custom-scrollbar">
+                    {compResults.imprResponse}
+                  </div>
+                </div>
+              </div>
+
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // --- TEMPLATES VIEW ---
+    function TemplatesView({ sendToImprover, copyToClipboard }) {
+      const [search, setSearch] = useState('');
+      const [selectedCategory, setSelectedCategory] = useState('All');
+
+      const categories = ['All', 'Study and Learning', 'Coding and Debugging', 'Academic Research', 'Resume and Interview Preparation', 'Presentation Creation', 'Content Writing', 'Business Planning', 'Data Analysis'];
+
+      const filtered = INITIAL_TEMPLATES.filter(t => {
+        const matchesCategory = selectedCategory === 'All' || t.category === selectedCategory;
+        const matchesSearch = t.title.toLowerCase().includes(search.toLowerCase()) || t.description.toLowerCase().includes(search.toLowerCase());
+        return matchesCategory && matchesSearch;
+      });
+
+      return (
+        <div className="space-y-6">
+          <div className="bg-white p-6 rounded-2xl border border-slate-200/80 shadow-sm">
+            <h2 className="text-xl font-extrabold text-slate-900 flex items-center space-x-2">
+              <i className="fa-solid fa-layer-group text-indigo-600"></i>
+              <span>Prompt Templates Library</span>
+            </h2>
+            <p className="text-slate-500 text-xs mt-1">
+              Curated, pre-engineered starter templates for common academic, coding, and professional workflows.
+            </p>
+
+            <div className="flex flex-col sm:flex-row gap-3 mt-4">
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search templates by keyword..."
+                className="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2 text-xs text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
+              />
+              <select
+                value={selectedCategory}
+                onChange={(e) => setSelectedCategory(e.target.value)}
+                className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-800 focus:outline-none"
+              >
+                {categories.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </div>
+          </div>
+
+          {/* Grid */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {filtered.map(tmpl => (
+              <div key={tmpl.id} className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-sm flex flex-col justify-between hover:border-indigo-200 transition">
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-[10px] font-bold text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded border border-indigo-100">
+                      {tmpl.category}
+                    </span>
+                    <button onClick={() => copyToClipboard(tmpl.prompt)} className="text-xs text-slate-400 hover:text-slate-600">
+                      <i className="fa-regular fa-copy"></i>
+                    </button>
+                  </div>
+                  <h3 className="font-bold text-slate-900 text-sm mb-1">{tmpl.title}</h3>
+                  <p className="text-xs text-slate-500 mb-3">{tmpl.description}</p>
+                  
+                  <div className="bg-slate-900 text-slate-300 font-mono text-[11px] p-3 rounded-xl border border-slate-800 mb-4 max-h-32 overflow-y-auto custom-scrollbar">
+                    {tmpl.prompt}
+                  </div>
+                </div>
+
+                <button
+                  onClick={() => sendToImprover(tmpl.prompt)}
+                  className="w-full bg-slate-100 hover:bg-slate-200 text-slate-800 font-semibold text-xs py-2 rounded-xl transition flex items-center justify-center space-x-1.5"
+                >
+                  <i className="fa-solid fa-wand-magic-sparkles text-indigo-600"></i>
+                  <span>Use & Customize Template</span>
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    // --- SAVED PROMPTS VIEW ---
+    function SavedPromptsView({ savedPrompts, setSavedPrompts, sendToImprover, sendToEvaluator, copyToClipboard, showToast }) {
+      const handleDelete = (id) => {
+        setSavedPrompts(savedPrompts.filter(p => p.id !== id));
+        showToast("Prompt deleted from saved list.");
+      };
+
+      return (
+        <div className="space-y-6">
+          <div className="bg-white p-6 rounded-2xl border border-slate-200/80 shadow-sm">
+            <h2 className="text-xl font-extrabold text-slate-900 flex items-center space-x-2">
+              <i className="fa-solid fa-bookmark text-indigo-600"></i>
+              <span>Saved Laboratory Prompts</span>
+            </h2>
+            <p className="text-slate-500 text-xs mt-1">
+              Prompts saved during your laboratory session. Stored locally in your browser cache.
+            </p>
+          </div>
+
+          {savedPrompts.length === 0 ? (
+            <div className="bg-white p-12 rounded-2xl border border-slate-200/80 text-center text-slate-400">
+              <i className="fa-regular fa-bookmark text-3xl mb-2"></i>
+              <p className="text-xs font-semibold">No saved prompts in laboratory storage yet.</p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 gap-4">
+              {savedPrompts.map(item => (
+                <div key={item.id} className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-sm flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs font-bold text-slate-900">{item.title}</span>
+                      <span className="text-[10px] text-slate-400">{item.date}</span>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
+                      <div>
+                        <span className="text-[10px] font-bold text-slate-400 uppercase block mb-1">Original</span>
+                        <p className="text-xs text-slate-600 bg-slate-50 p-2.5 rounded-lg border border-slate-200">{item.original}</p>
+                      </div>
+                      <div>
+                        <span className="text-[10px] font-bold text-indigo-600 uppercase block mb-1">Improved</span>
+                        <p className="text-xs text-slate-800 bg-indigo-50/50 p-2.5 rounded-lg border border-indigo-100 font-mono">{item.improved}</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex justify-end space-x-2 pt-2 border-t border-slate-100">
+                    <button 
+                      onClick={() => copyToClipboard(item.improved)}
+                      className="text-xs px-2.5 py-1.5 text-slate-600 hover:bg-slate-100 rounded-lg"
+                    >
+                      <i className="fa-regular fa-copy mr-1"></i> Copy
+                    </button>
+                    <button 
+                      onClick={() => sendToImprover(item.improved)}
+                      className="text-xs px-2.5 py-1.5 text-indigo-600 hover:bg-indigo-50 rounded-lg"
+                    >
+                      <i className="fa-solid fa-wand-magic-sparkles mr-1"></i> Edit
+                    </button>
+                    <button 
+                      onClick={() => handleDelete(item.id)}
+                      className="text-xs px-2.5 py-1.5 text-red-600 hover:bg-red-50 rounded-lg"
+                    >
+                      <i className="fa-solid fa-trash mr-1"></i> Delete
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    const rootElement = document.getElementById('root');
+    ReactDOM.createRoot(rootElement).render(<App />);
+  </script>
+</body>
+</html>
