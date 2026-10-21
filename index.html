@@ -53,21 +53,24 @@
     const { useState, useEffect, useRef, useMemo } = React;
 
     // --- GEMINI API INTEGRATION HELPERS ---
-    const API_KEY = "YOUR_API_KEY"; // System populates or uses server proxy
     const MODEL_NAME = "gemini-3-flash-preview";
 
-    async function callGeminiAPI(systemPrompt, userQuery, isJson = false) {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${API_KEY}`;
-      
-      const payload = {
-        contents: [{ parts: [{ text: userQuery }] }],
-        systemInstruction: { parts: [{ text: systemPrompt }] }
-      };
+    async function callGeminiAPI(systemPrompt, userQuery, userApiKey, isJson = false) {
+      let url;
+      let payload;
 
-      if (isJson) {
-        payload.generationConfig = {
-          responseMimeType: "application/json"
+      if (userApiKey && userApiKey.trim() !== "") {
+        url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${userApiKey.trim()}`;
+        payload = {
+          contents: [{ parts: [{ text: userQuery }] }],
+          systemInstruction: { parts: [{ text: systemPrompt }] }
         };
+        if (isJson) {
+          payload.generationConfig = { responseMimeType: "application/json" };
+        }
+      } else {
+        url = `/api/gemini`;
+        payload = { systemPrompt, userQuery, isJson };
       }
 
       let attempts = 0;
@@ -83,14 +86,17 @@
           });
 
           if (!res.ok) {
+            if (res.status === 400 || res.status === 403) {
+              throw new Error("Invalid or missing Gemini API Key. Please click 'Configure Gemini API Key' in the top bar to enter a valid key.");
+            }
             throw new Error(`Gemini API Error: Status ${res.status}`);
           }
 
           const data = await res.json();
-          const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-          if (!text) throw new Error("Received empty response from Gemini API.");
+          const text = userApiKey ? data?.candidates?.[0]?.content?.parts?.[0]?.text : data?.text;
+          if (!text) throw new Error("Received empty response from Gemini API engine.");
 
-          return isJson ? JSON.parse(text) : text;
+          return isJson ? (typeof text === 'string' ? JSON.parse(text) : text) : text;
         } catch (err) {
           attempts++;
           if (attempts >= maxAttempts) throw err;
@@ -191,6 +197,9 @@
     // --- MAIN APP COMPONENT ---
     function App() {
       const [activeTab, setActiveTab] = useState('dashboard');
+      const [apiKey, setApiKey] = useState(() => localStorage.getItem('promptcraft_gemini_key') || '');
+      const [showKeyModal, setShowKeyModal] = useState(false);
+      const [tempKeyInput, setTempKeyInput] = useState('');
       
       // Prompt Improver State
       const [originalPrompt, setOriginalPrompt] = useState('');
@@ -242,6 +251,14 @@
           localStorage.setItem('promptcraft_saved', JSON.stringify(savedPrompts));
         } catch(e) {}
       }, [savedPrompts]);
+
+      const saveApiKey = (key) => {
+        const trimmed = key.trim();
+        setApiKey(trimmed);
+        localStorage.setItem('promptcraft_gemini_key', trimmed);
+        setShowKeyModal(false);
+        showToast(trimmed ? "Gemini API Key saved securely!" : "API Key cleared from browser storage.");
+      };
 
       const showToast = (message, type = 'success') => {
         setToast({ message, type });
@@ -303,11 +320,11 @@ Target Tone/Style: ${outputStyle}
 Additional Context/Constraints: ${additionalContext || "None specified"}`;
 
         try {
-          const res = await callGeminiAPI(sysPrompt, userMsg, true);
+          const res = await callGeminiAPI(sysPrompt, userMsg, apiKey, true);
           setImproverResult(res);
         } catch (err) {
           console.error(err);
-          setImproverError("Failed to generate improved prompt using Gemini API. Please check network connection or retry.");
+          setImproverError(err.message || "Failed to generate improved prompt using Gemini API.");
         } finally {
           setImproverLoading(false);
         }
@@ -380,11 +397,11 @@ Return ONLY valid JSON with this structure:
 }`;
 
         try {
-          const res = await callGeminiAPI(sysPrompt, `Evaluate this prompt:\n"${evalPrompt}"`, true);
+          const res = await callGeminiAPI(sysPrompt, `Evaluate this prompt:\n"${evalPrompt}"`, apiKey, true);
           setEvalResult(res);
         } catch (err) {
           console.error(err);
-          setEvalError("Could not calculate evaluation scores via Gemini API. Please retry.");
+          setEvalError(err.message || "Could not calculate evaluation scores via Gemini API.");
         } finally {
           setEvalLoading(false);
         }
@@ -404,8 +421,8 @@ Return ONLY valid JSON with this structure:
         try {
           const sys = "You are a neutral AI assistant responding directly to user instructions.";
           const [resOrig, resImpr] = await Promise.all([
-            callGeminiAPI(sys, compOrigPrompt, false),
-            callGeminiAPI(sys, compImprPrompt, false)
+            callGeminiAPI(sys, compOrigPrompt, apiKey, false),
+            callGeminiAPI(sys, compImprPrompt, apiKey, false)
           ]);
 
           setCompResults({
@@ -414,7 +431,7 @@ Return ONLY valid JSON with this structure:
           });
         } catch (err) {
           console.error(err);
-          setCompError("Error running prompt comparison. Please ensure valid API connectivity.");
+          setCompError(err.message || "Error running prompt comparison.");
         } finally {
           setCompLoading(false);
         }
@@ -478,9 +495,107 @@ Return ONLY valid JSON with this structure:
                   </div>
                 </div>
 
+                {/* Configure API Key Action Button */}
+                <button
+                  onClick={() => {
+                    setTempKeyInput(apiKey);
+                    setShowKeyModal(true);
+                  }}
+                  className={`flex items-center space-x-2 text-xs font-bold px-3.5 py-2 rounded-xl transition shadow-md ${
+                    apiKey 
+                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 hover:bg-emerald-500/30' 
+                      : 'bg-indigo-600 hover:bg-indigo-500 text-white border border-indigo-400/50 shadow-indigo-500/20'
+                  }`}
+                >
+                  <i className={`fa-solid ${apiKey ? 'fa-circle-check text-emerald-400' : 'fa-key'}`}></i>
+                  <span>{apiKey ? 'API Key Configured' : 'Configure Gemini API Key'}</span>
+                </button>
+
               </div>
             </div>
           </header>
+
+          {/* Setup Banner if key is missing */}
+          {!apiKey && (
+            <div className="bg-gradient-to-r from-indigo-900 via-indigo-800 to-purple-900 text-indigo-100 text-xs py-2.5 px-4 shadow-inner border-b border-indigo-700/50">
+              <div className="max-w-7xl mx-auto flex items-center justify-between flex-wrap gap-2">
+                <div className="flex items-center space-x-2">
+                  <i className="fa-solid fa-circle-info text-indigo-300 text-sm"></i>
+                  <span><strong>Setup Needed:</strong> Enter your Gemini API key to enable live AI prompt optimization and direct evaluations.</span>
+                </div>
+                <button
+                  onClick={() => {
+                    setTempKeyInput('');
+                    setShowKeyModal(true);
+                  }}
+                  className="underline text-white font-bold hover:text-indigo-200 text-xs cursor-pointer ml-auto"
+                >
+                  Click here to set key &rarr;
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Key Settings Modal */}
+          {showKeyModal && (
+            <div className="fixed inset-0 z-50 bg-slate-900/70 backdrop-blur-sm flex items-center justify-center p-4">
+              <div className="bg-white rounded-3xl p-6 max-w-md w-full shadow-2xl border border-slate-200 space-y-4">
+                <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                  <h3 className="font-extrabold text-slate-900 text-base flex items-center space-x-2">
+                    <i className="fa-solid fa-key text-indigo-600"></i>
+                    <span>Configure Gemini API Key</span>
+                  </h3>
+                  <button onClick={() => setShowKeyModal(false)} className="text-slate-400 hover:text-slate-600 text-sm p-1">
+                    <i className="fa-solid fa-xmark text-lg"></i>
+                  </button>
+                </div>
+
+                <p className="text-xs text-slate-600 leading-relaxed">
+                  To use live AI prompt generation on Vercel without hardcoding keys, paste your free Gemini API key below. It is stored safely in your browser local storage.
+                </p>
+
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-700 uppercase tracking-wider mb-1">
+                    Gemini API Key
+                  </label>
+                  <input
+                    type="password"
+                    value={tempKeyInput}
+                    onChange={(e) => setTempKeyInput(e.target.value)}
+                    placeholder="AIzaSy..."
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs font-mono text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                </div>
+
+                <div className="flex items-center justify-between pt-2">
+                  <a 
+                    href="https://aistudio.google.com/" 
+                    target="_blank" 
+                    rel="noreferrer" 
+                    className="text-xs font-semibold text-indigo-600 hover:underline flex items-center space-x-1"
+                  >
+                    <span>Get free key from Google AI Studio</span>
+                    <i className="fa-solid fa-arrow-up-right-from-square text-[10px]"></i>
+                  </a>
+
+                  <div className="flex items-center space-x-2">
+                    <button
+                      onClick={() => saveApiKey('')}
+                      className="px-3 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl transition"
+                    >
+                      Clear Key
+                    </button>
+                    <button
+                      onClick={() => saveApiKey(tempKeyInput)}
+                      className="px-4 py-2 text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl shadow-md transition"
+                    >
+                      Save Key
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Main Content Layout */}
           <div className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 flex flex-col md:flex-row gap-6">
@@ -533,12 +648,21 @@ Return ONLY valid JSON with this structure:
               {/* Status & Key Info Card */}
               <div className="mt-4 bg-gradient-to-br from-indigo-900 to-purple-950 text-white p-4 rounded-2xl shadow-sm border border-indigo-800 hidden md:block">
                 <div className="flex items-center space-x-2 text-indigo-300 text-xs font-semibold mb-2">
-                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-                  <span>API Status: Connected</span>
+                  <span className={`w-2 h-2 rounded-full ${apiKey ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`}></span>
+                  <span>API Status: {apiKey ? 'Configured' : 'Needs Key'}</span>
                 </div>
-                <p className="text-xs text-indigo-200/80 leading-relaxed">
+                <p className="text-xs text-indigo-200/80 leading-relaxed mb-2">
                   Engineered for real-time prompt analysis & smart optimization workspace.
                 </p>
+                <button
+                  onClick={() => {
+                    setTempKeyInput(apiKey);
+                    setShowKeyModal(true);
+                  }}
+                  className="text-[11px] underline text-indigo-300 hover:text-white font-medium"
+                >
+                  Configure API Key &rarr;
+                </button>
               </div>
             </aside>
 
@@ -563,6 +687,9 @@ Return ONLY valid JSON with this structure:
                   setOriginalPrompt={setOriginalPrompt} 
                   savedCount={savedPrompts.length}
                   handleLoadSample={handleLoadSample}
+                  setShowKeyModal={setShowKeyModal}
+                  setTempKeyInput={setTempKeyInput}
+                  apiKey={apiKey}
                 />
               )}
 
@@ -676,7 +803,7 @@ Return ONLY valid JSON with this structure:
     }
 
     // --- DASHBOARD VIEW ---
-    function DashboardView({ setActiveTab, setOriginalPrompt, savedCount, handleLoadSample }) {
+    function DashboardView({ setActiveTab, setOriginalPrompt, savedCount, handleLoadSample, setShowKeyModal, setTempKeyInput, apiKey }) {
       const [quickInput, setQuickInput] = useState('');
 
       const handleQuickStart = (e) => {
@@ -785,24 +912,29 @@ Return ONLY valid JSON with this structure:
               </button>
             </div>
 
-            {/* Prompt Library Box */}
+            {/* API Config Box */}
             <div className="bg-white p-6 rounded-2xl border border-slate-200/80 shadow-sm flex flex-col justify-between">
               <div>
-                <div className="flex items-center space-x-2 text-purple-600 font-semibold text-sm mb-2">
-                  <i className="fa-solid fa-layer-group"></i>
-                  <span>Structured Template Library</span>
+                <div className="flex items-center space-x-2 text-emerald-600 font-semibold text-sm mb-2">
+                  <i className="fa-solid fa-key"></i>
+                  <span>Gemini API Key Configuration</span>
                 </div>
-                <h3 className="text-lg font-bold text-slate-900 mb-1">12 Pre-Built Templates</h3>
+                <h3 className="text-lg font-bold text-slate-900 mb-1">{apiKey ? 'Key Configured' : 'No Key Set'}</h3>
                 <p className="text-slate-600 text-xs leading-relaxed mb-4">
-                  Explore curated templates tailored for Academic Research, Coding, Data Analysis, and Career Preparation.
+                  {apiKey 
+                    ? 'Your Gemini API key is configured safely in browser local storage for direct AI generation.' 
+                    : 'Set your free Gemini API Key to enable live response generation on Vercel.'}
                 </p>
               </div>
               <button
-                onClick={() => setActiveTab('templates')}
+                onClick={() => {
+                  setTempKeyInput(apiKey);
+                  setShowKeyModal(true);
+                }}
                 className="w-full bg-slate-100 hover:bg-slate-200 text-slate-800 font-semibold text-xs py-2.5 rounded-xl transition flex items-center justify-center space-x-2"
               >
-                <i className="fa-solid fa-book-open text-purple-600"></i>
-                <span>Browse Template Library</span>
+                <i className="fa-solid fa-gear text-emerald-600"></i>
+                <span>{apiKey ? 'Manage API Key' : 'Configure Gemini Key'}</span>
               </button>
             </div>
 
